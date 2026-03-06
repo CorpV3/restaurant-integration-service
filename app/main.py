@@ -13,6 +13,8 @@ import hashlib
 import os
 import secrets
 
+from .routers.delivery_integrations import router as delivery_router
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,6 +32,19 @@ app = FastAPI(
     description="Third-party delivery platform integration",
     version="1.0.0"
 )
+
+app.include_router(delivery_router)
+
+
+@app.on_event("startup")
+async def startup():
+    """Initialize DB pool and ensure tables exist on startup."""
+    from .db import get_pool
+    try:
+        await get_pool()
+        logger.info("Database pool initialized")
+    except Exception as e:
+        logger.warning(f"DB pool init skipped (may not be configured): {e}")
 
 # CORS
 app.add_middleware(
