@@ -114,14 +114,17 @@ async def find_menu_item_id(item_name: str) -> str:
     # Hardcoded menu item mapping for testing
     # In production, you should query the restaurant service to match items
     menu_mapping = {
-        "biriyani": "aaf9ad8c-ee6a-4bb6-84f9-4f0f7cf3f11e",
-        "biryani": "aaf9ad8c-ee6a-4bb6-84f9-4f0f7cf3f11e",
-        "salad": "18386a1a-89a8-497d-b90b-02d0cf33b48a",
-        "pizza": "aaf9ad8c-ee6a-4bb6-84f9-4f0f7cf3f11e",  # Default to biriyani for testing
+        "biriyani": "685ed9cf-ae9b-4f78-8fa8-d63d69908a46",
+        "biryani": "685ed9cf-ae9b-4f78-8fa8-d63d69908a46",
+        "masala chai": "685ed9cf-ae9b-4f78-8fa8-d63d69908a46",
+        "vada pav": "615eef6e-10cc-4393-b1c7-6c6e561e1397",
+        "idli": "b3c90375-f5fb-4940-a15d-dfb1c9f4da26",
+        "dosa": "400af82e-b845-46a1-9014-164ccff75a4a",
+        "chai": "b17ba753-d51c-4cef-9789-01747a3a01a3",
     }
 
     item_key = item_name.lower().strip()
-    return menu_mapping.get(item_key, menu_mapping["biriyani"])  # Default fallback
+    return menu_mapping.get(item_key, "685ed9cf-ae9b-4f78-8fa8-d63d69908a46")  # Default fallback
 
 
 async def publish_order_notification(order: Dict[str, Any]):
