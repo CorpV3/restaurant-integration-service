@@ -12,7 +12,29 @@ logger = setup_logger("uber-handler")
 
 # Order service URL
 ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8004")
-RESTAURANT_ID = os.getenv("DEFAULT_RESTAURANT_ID", "6956017d-3aea-4ae2-9709-0ca0ac0a1a09")
+
+
+async def get_restaurant_id_for_store(uber_store_id: str) -> str:
+    """
+    Lookup the restaurant UUID that maps to the given Uber Eats store UUID.
+    Falls back to DEFAULT_RESTAURANT_ID env var if not found in DB.
+    """
+    from .db import get_pool
+    fallback = os.getenv("DEFAULT_RESTAURANT_ID", "6956017d-3aea-4ae2-9709-0ca0ac0a1a09")
+    if not uber_store_id:
+        return fallback
+    try:
+        pool = await get_pool()
+        row = await pool.fetchrow(
+            "SELECT restaurant_id FROM delivery_integrations "
+            "WHERE platform = 'uber_eats' AND external_store_id = $1 AND is_active = TRUE",
+            uber_store_id
+        )
+        if row:
+            return str(row["restaurant_id"])
+    except Exception as e:
+        logger.warning(f"DB lookup failed for uber_store_id={uber_store_id}: {e}")
+    return fallback
 
 
 async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,9 +54,18 @@ async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         logger.info(f"Processing Uber order: {uber_order.get('id', 'unknown')}")
 
+        # Resolve restaurant from the Uber store UUID embedded in the webhook
+        uber_store_id = (
+            payload.get("store_id")
+            or uber_order.get("store_id")
+            or payload.get("resource_id")
+        )
+        restaurant_id = await get_restaurant_id_for_store(uber_store_id)
+        logger.info(f"Resolved restaurant_id={restaurant_id} for uber_store_id={uber_store_id}")
+
         # Map Uber Eats order to our order format
         order_data = {
-            "restaurant_id": RESTAURANT_ID,
+            "restaurant_id": restaurant_id,
             "table_id": None,  # Uber orders don't have table_id
             "order_type": "ONLINE",  # Use ONLINE type for Uber Eats orders
             "customer_name": uber_order.get("eater", {}).get("first_name", "Uber Customer") + " " +
