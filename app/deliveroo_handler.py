@@ -55,18 +55,24 @@ async def process_deliveroo_order(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     try:
         order_data_raw = payload.get("order", payload.get("data", {}))
-        site_id = payload.get("site_id") or payload.get("location_id")
-        restaurant_id = await get_restaurant_id_for_site(site_id)
-        logger.info(f"Processing Deliveroo order for site={site_id} → restaurant={restaurant_id}")
+        # site_id can be in payload root or inside order data
+        site_id = (payload.get("site_id") or payload.get("location_id")
+                   or order_data_raw.get("location_id") or order_data_raw.get("site_id"))
+        restaurant_id = await get_restaurant_id_for_site(str(site_id) if site_id else "")
+        logger.info(f"Processing Deliveroo order id={order_data_raw.get('id')} site={site_id} → restaurant={restaurant_id}")
 
+        # Customer — sandbox may omit customer block; fall back gracefully
         customer = order_data_raw.get("customer", {})
+        customer_name = (customer.get("name") or
+                         f"{customer.get('first_name','')} {customer.get('last_name','')}".strip()
+                         or "Deliveroo Customer")
+
+        # Fulfillment type
         fulfillment = order_data_raw.get("fulfillment", {})
         fulfillment_type = fulfillment.get("type", "DELIVERY").upper()
-
-        # Map fulfillment type to our order type
         order_type = "ONLINE" if fulfillment_type == "DELIVERY" else "TAKEAWAY"
 
-        # Build delivery address string
+        # Delivery address
         delivery_address = ""
         if fulfillment_type == "DELIVERY":
             addr = fulfillment.get("delivery_address", {})
@@ -78,28 +84,46 @@ async def process_deliveroo_order(payload: Dict[str, Any]) -> Dict[str, Any]:
             ]
             delivery_address = ", ".join(p for p in parts if p)
 
+        # Deliveroo display_id for reference
+        display_id = order_data_raw.get("display_id", "")
+        notes = f"Deliveroo #{display_id}" if display_id else "Deliveroo order"
+        if order_data_raw.get("customer_notes"):
+            notes += f" | {order_data_raw['customer_notes']}"
+
         order_payload = {
             "restaurant_id": restaurant_id,
             "order_type": order_type,
-            "customer_name": customer.get("name", "Deliveroo Customer"),
-            "customer_phone": customer.get("phone_number", ""),
+            "customer_name": customer_name,
+            "customer_phone": customer.get("phone_number", customer.get("phone", "")),
             "customer_email": customer.get("email", ""),
             "delivery_address": delivery_address,
-            "special_instructions": order_data_raw.get("customer_notes", ""),
+            "special_instructions": notes,
             "items": [],
         }
 
-        # Map line items
-        for item in order_data_raw.get("items", []):
-            menu_item_id = await find_menu_item_id(item.get("name", ""))
-            if menu_item_id:
-                order_payload["items"].append({
-                    "menu_item_id": menu_item_id,
-                    "quantity": item.get("quantity", 1),
-                    "special_requests": item.get("modifier_text", ""),
-                })
-            else:
-                logger.warning(f"Could not match Deliveroo item: {item.get('name')}")
+        # Map line items — Deliveroo sandbox may send items[] or order_items[]
+        raw_items = (order_data_raw.get("items")
+                     or order_data_raw.get("order_items")
+                     or [])
+
+        if not raw_items:
+            # Sandbox test orders sometimes have no items — add a default
+            logger.warning("No items in Deliveroo payload — using default menu item")
+            default_id = await find_menu_item_id("")
+            if default_id:
+                order_payload["items"].append({"menu_item_id": default_id, "quantity": 1})
+        else:
+            for item in raw_items:
+                item_name = item.get("name") or item.get("title") or item.get("description", "")
+                menu_item_id = await find_menu_item_id(item_name)
+                if menu_item_id:
+                    order_payload["items"].append({
+                        "menu_item_id": menu_item_id,
+                        "quantity": item.get("quantity", 1),
+                        "special_requests": item.get("modifier_text", item.get("special_instructions", "")),
+                    })
+                else:
+                    logger.warning(f"Could not match Deliveroo item: {item_name}")
 
         if not order_payload["items"]:
             logger.error("No items could be matched — order not created")

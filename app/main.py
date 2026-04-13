@@ -235,8 +235,16 @@ async def deliveroo_webhook(
 
         import json
         payload = json.loads(body.decode())
-        event_type = payload.get("event_type", "unknown")
+
+        # Deliveroo uses "event" key (not "event_type")
+        # Order data lives in payload["body"]["order"]
+        event_type = payload.get("event") or payload.get("event_type", "unknown")
         logger.info(f"Deliveroo event: {event_type}")
+
+        # Normalise: pull order out of "body" wrapper if present
+        if "body" in payload:
+            payload["order"] = payload["body"].get("order", {})
+            payload["site_id"] = payload["order"].get("location_id", "")
 
         from .deliveroo_handler import (
             process_deliveroo_order,
@@ -244,7 +252,8 @@ async def deliveroo_webhook(
             handle_deliveroo_status,
         )
 
-        if event_type in ("order_created", "orders.notification"):
+        # order.status_update with status "accepted"/"pending" = new order in sandbox
+        if event_type in ("order_created", "orders.notification", "order.notification"):
             order = await process_deliveroo_order(payload)
             return {
                 "status": "success",
@@ -253,13 +262,28 @@ async def deliveroo_webhook(
                 "order_id": order.get("id"),
             }
 
-        elif event_type in ("order_cancelled", "orders.cancel"):
+        elif event_type in ("order.status_update", "order_status_update", "orders.status_update"):
+            order_data = payload.get("order", {})
+            status = order_data.get("status", "")
+            deliveroo_order_id = order_data.get("id", "")
+            logger.info(f"Deliveroo order {deliveroo_order_id} status: {status}")
+
+            # In sandbox, "accepted" is the first event — treat as new order
+            if status in ("accepted", "pending"):
+                order = await process_deliveroo_order(payload)
+                return {
+                    "status": "success",
+                    "message": "Deliveroo order created from status update",
+                    "order_number": order.get("order_number"),
+                    "order_id": order.get("id"),
+                }
+            else:
+                result = await handle_deliveroo_status(payload)
+                return {"status": "success", "message": "Status updated", "data": result}
+
+        elif event_type in ("order_cancelled", "orders.cancel", "order.cancelled"):
             result = await handle_deliveroo_cancel(payload)
             return {"status": "success", "message": "Order cancelled", "data": result}
-
-        elif event_type in ("order_status_update", "orders.status_update"):
-            result = await handle_deliveroo_status(payload)
-            return {"status": "success", "message": "Status updated", "data": result}
 
         else:
             logger.info(f"Unhandled Deliveroo event: {event_type} — acknowledging")
