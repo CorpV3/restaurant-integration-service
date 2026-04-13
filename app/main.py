@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration from environment
 UBER_CLIENT_SECRET = os.getenv("UBER_CLIENT_SECRET", "m4a4DRDfkgtoPDTh9JVI0RHx-5J7nAJ9x4pntgSU")
+DELIVEROO_WEBHOOK_SECRET = os.getenv("DELIVEROO_WEBHOOK_SECRET", "")
 WEBHOOK_USERNAME = os.getenv("WEBHOOK_USERNAME", "uber-webhook")
 WEBHOOK_PASSWORD = os.getenv("WEBHOOK_PASSWORD", "secure-password-123")
 
@@ -194,6 +195,92 @@ async def test_webhook():
         "message": "Webhook endpoint is accessible",
         "webhook_url": "https://restaurant.corpv3.com/api/v1/webhooks/uber-eats"
     }
+
+def verify_deliveroo_signature(body: bytes, signature: str) -> bool:
+    """Verify X-Deliveroo-Signature header (HMAC-SHA256)."""
+    if not DELIVEROO_WEBHOOK_SECRET or not signature:
+        return True  # Skip if secret not configured (sandbox testing)
+    expected = hmac.new(
+        DELIVEROO_WEBHOOK_SECRET.encode(),
+        body,
+        hashlib.sha256
+    ).hexdigest()
+    return secrets.compare_digest(signature.lower(), expected.lower())
+
+
+@app.post("/api/v1/webhooks/deliveroo")
+async def deliveroo_webhook(
+    request: Request,
+    x_deliveroo_signature: Optional[str] = Header(None),
+):
+    """
+    Receive webhooks from Deliveroo Partner Platform.
+
+    Events handled:
+    - order_created       : New order received
+    - order_cancelled     : Order cancelled by customer or Deliveroo
+    - order_status_update : Order status changed
+
+    Configure this URL in the Deliveroo Developer Portal → Webhooks → Order events:
+      https://testenv.corpv3.com/api/v1/webhooks/deliveroo
+    """
+    try:
+        body = await request.body()
+        logger.info(f"Deliveroo webhook received: {body[:300]}")
+
+        # Verify signature if secret is configured
+        if not verify_deliveroo_signature(body, x_deliveroo_signature or ""):
+            logger.warning("Invalid Deliveroo webhook signature")
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+        import json
+        payload = json.loads(body.decode())
+        event_type = payload.get("event_type", "unknown")
+        logger.info(f"Deliveroo event: {event_type}")
+
+        from .deliveroo_handler import (
+            process_deliveroo_order,
+            handle_deliveroo_cancel,
+            handle_deliveroo_status,
+        )
+
+        if event_type in ("order_created", "orders.notification"):
+            order = await process_deliveroo_order(payload)
+            return {
+                "status": "success",
+                "message": "Deliveroo order created",
+                "order_number": order.get("order_number"),
+                "order_id": order.get("id"),
+            }
+
+        elif event_type in ("order_cancelled", "orders.cancel"):
+            result = await handle_deliveroo_cancel(payload)
+            return {"status": "success", "message": "Order cancelled", "data": result}
+
+        elif event_type in ("order_status_update", "orders.status_update"):
+            result = await handle_deliveroo_status(payload)
+            return {"status": "success", "message": "Status updated", "data": result}
+
+        else:
+            logger.info(f"Unhandled Deliveroo event: {event_type} — acknowledging")
+            return {"status": "success", "message": f"Event '{event_type}' acknowledged"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Deliveroo webhook error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/webhooks/deliveroo/test")
+async def deliveroo_webhook_test():
+    """Verify the Deliveroo webhook endpoint is reachable."""
+    return {
+        "status": "ok",
+        "message": "Deliveroo webhook endpoint is accessible",
+        "webhook_url": "https://testenv.corpv3.com/api/v1/webhooks/deliveroo",
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

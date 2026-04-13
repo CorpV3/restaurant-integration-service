@@ -13,7 +13,7 @@ from ..db import get_pool
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/delivery-integrations", tags=["delivery-integrations"])
 
-WEBHOOK_BASE_URL = "https://restaurant.corpv3.com/api/v1/webhooks"
+WEBHOOK_BASE_URL = "https://testenv.corpv3.com/api/v1/webhooks"
 
 PLATFORM_WEBHOOK_PATHS = {
     "uber_eats": f"{WEBHOOK_BASE_URL}/uber-eats",
