@@ -94,6 +94,12 @@ async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 logger.warning(f"Could not match Uber item: {uber_item.get('title')}")
 
+        if not order_data["items"]:
+            logger.warning("No items matched — using first available menu item")
+            default_id = await find_menu_item_id("")
+            if default_id:
+                order_data["items"].append({"menu_item_id": default_id, "quantity": 1})
+
         # Create order via order service API
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -102,7 +108,7 @@ async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
                 timeout=10.0
             )
 
-            if response.status_code == 201:
+            if response.status_code in (200, 201):
                 created_order = response.json()
                 logger.info(f"Successfully created order {created_order.get('order_number')}")
 
@@ -137,22 +143,24 @@ def format_delivery_address(delivery_data: Dict[str, Any]) -> str:
 
 
 async def find_menu_item_id(item_name: str) -> str:
-    """
-    Find menu item ID by name
-    For now, returns a default menu item ID
-    TODO: Implement proper menu item matching logic
-    """
-    # Hardcoded menu item mapping for testing
-    # In production, you should query the restaurant service to match items
-    menu_mapping = {
-        "biriyani": "aaf9ad8c-ee6a-4bb6-84f9-4f0f7cf3f11e",
-        "biryani": "aaf9ad8c-ee6a-4bb6-84f9-4f0f7cf3f11e",
-        "salad": "18386a1a-89a8-497d-b90b-02d0cf33b48a",
-        "pizza": "aaf9ad8c-ee6a-4bb6-84f9-4f0f7cf3f11e",  # Default to biriyani for testing
-    }
-
-    item_key = item_name.lower().strip()
-    return menu_mapping.get(item_key, menu_mapping["biriyani"])  # Default fallback
+    """Find menu item ID by name using DB lookup (case-insensitive substring match)."""
+    from .db import get_pool
+    try:
+        pool = await get_pool()
+        if item_name:
+            row = await pool.fetchrow(
+                "SELECT id FROM menu_items WHERE LOWER(name) LIKE '%' || LOWER($1) || '%' LIMIT 1",
+                item_name,
+            )
+            if row:
+                return str(row["id"])
+        # Fallback: return first available menu item
+        row = await pool.fetchrow("SELECT id FROM menu_items LIMIT 1")
+        if row:
+            return str(row["id"])
+    except Exception as e:
+        logger.warning(f"Menu lookup failed for '{item_name}': {e}")
+    return None
 
 
 async def publish_order_notification(order: Dict[str, Any]):
