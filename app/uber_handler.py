@@ -12,7 +12,29 @@ logger = setup_logger("uber-handler")
 
 # Order service URL
 ORDER_SERVICE_URL = os.getenv("ORDER_SERVICE_URL", "http://order-service:8004")
-RESTAURANT_ID = os.getenv("DEFAULT_RESTAURANT_ID", "6956017d-3aea-4ae2-9709-0ca0ac0a1a09")
+
+
+async def get_restaurant_id_for_store(uber_store_id: str) -> str:
+    """
+    Lookup the restaurant UUID that maps to the given Uber Eats store UUID.
+    Falls back to DEFAULT_RESTAURANT_ID env var if not found in DB.
+    """
+    from .db import get_pool
+    fallback = os.getenv("DEFAULT_RESTAURANT_ID", "6956017d-3aea-4ae2-9709-0ca0ac0a1a09")
+    if not uber_store_id:
+        return fallback
+    try:
+        pool = await get_pool()
+        row = await pool.fetchrow(
+            "SELECT restaurant_id FROM delivery_integrations "
+            "WHERE platform = 'uber_eats' AND external_store_id = $1 AND is_active = TRUE",
+            uber_store_id
+        )
+        if row:
+            return str(row["restaurant_id"])
+    except Exception as e:
+        logger.warning(f"DB lookup failed for uber_store_id={uber_store_id}: {e}")
+    return fallback
 
 
 async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,9 +54,18 @@ async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         logger.info(f"Processing Uber order: {uber_order.get('id', 'unknown')}")
 
+        # Resolve restaurant from the Uber store UUID embedded in the webhook
+        uber_store_id = (
+            payload.get("store_id")
+            or uber_order.get("store_id")
+            or payload.get("resource_id")
+        )
+        restaurant_id = await get_restaurant_id_for_store(uber_store_id)
+        logger.info(f"Resolved restaurant_id={restaurant_id} for uber_store_id={uber_store_id}")
+
         # Map Uber Eats order to our order format
         order_data = {
-            "restaurant_id": RESTAURANT_ID,
+            "restaurant_id": restaurant_id,
             "table_id": None,  # Uber orders don't have table_id
             "order_type": "ONLINE",  # Use ONLINE type for Uber Eats orders
             "customer_name": uber_order.get("eater", {}).get("first_name", "Uber Customer") + " " +
@@ -63,6 +94,12 @@ async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 logger.warning(f"Could not match Uber item: {uber_item.get('title')}")
 
+        if not order_data["items"]:
+            logger.warning("No items matched — using first available menu item")
+            default_id = await find_menu_item_id("")
+            if default_id:
+                order_data["items"].append({"menu_item_id": default_id, "quantity": 1})
+
         # Create order via order service API
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -71,7 +108,7 @@ async def process_uber_order(payload: Dict[str, Any]) -> Dict[str, Any]:
                 timeout=10.0
             )
 
-            if response.status_code == 201:
+            if response.status_code in (200, 201):
                 created_order = response.json()
                 logger.info(f"Successfully created order {created_order.get('order_number')}")
 
@@ -106,25 +143,24 @@ def format_delivery_address(delivery_data: Dict[str, Any]) -> str:
 
 
 async def find_menu_item_id(item_name: str) -> str:
-    """
-    Find menu item ID by name
-    For now, returns a default menu item ID
-    TODO: Implement proper menu item matching logic
-    """
-    # Hardcoded menu item mapping for testing
-    # In production, you should query the restaurant service to match items
-    menu_mapping = {
-        "biriyani": "685ed9cf-ae9b-4f78-8fa8-d63d69908a46",
-        "biryani": "685ed9cf-ae9b-4f78-8fa8-d63d69908a46",
-        "masala chai": "685ed9cf-ae9b-4f78-8fa8-d63d69908a46",
-        "vada pav": "615eef6e-10cc-4393-b1c7-6c6e561e1397",
-        "idli": "b3c90375-f5fb-4940-a15d-dfb1c9f4da26",
-        "dosa": "400af82e-b845-46a1-9014-164ccff75a4a",
-        "chai": "b17ba753-d51c-4cef-9789-01747a3a01a3",
-    }
-
-    item_key = item_name.lower().strip()
-    return menu_mapping.get(item_key, "685ed9cf-ae9b-4f78-8fa8-d63d69908a46")  # Default fallback
+    """Find menu item ID by name using DB lookup (case-insensitive substring match)."""
+    from .db import get_pool
+    try:
+        pool = await get_pool()
+        if item_name:
+            row = await pool.fetchrow(
+                "SELECT id FROM menu_items WHERE LOWER(name) LIKE '%' || LOWER($1) || '%' LIMIT 1",
+                item_name,
+            )
+            if row:
+                return str(row["id"])
+        # Fallback: return first available menu item
+        row = await pool.fetchrow("SELECT id FROM menu_items LIMIT 1")
+        if row:
+            return str(row["id"])
+    except Exception as e:
+        logger.warning(f"Menu lookup failed for '{item_name}': {e}")
+    return None
 
 
 async def publish_order_notification(order: Dict[str, Any]):
