@@ -96,7 +96,8 @@ jobs:
           cd infrastructure
           git config user.name "shadrach"
           git config user.email "shadrachdoc@gmail.com"
-          git pull --rebase origin main || true
+          git checkout develop
+          git pull --rebase origin develop || true
           git add .
           git diff --staged --quiet || git commit -m "Test deploy ${{ env.SERVICE_NAME }}: ${{ needs.build-and-push.outputs.short_sha }}"
-          git push
+          git push origin develop
